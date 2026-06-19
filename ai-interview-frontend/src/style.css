@@ -126,9 +126,20 @@ button {
 }
 
 .btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-5);
+  font-size: var(--text-base);
+  font-weight: 500;
+  font-family: inherit;
+  transition: all var(--duration-fast) var(--ease-out);
   background: var(--c-primary);
   color: white;
   border: 1px solid var(--c-primary);
+  text-decoration: none;
 }
 .btn-primary:hover {
   background: var(--c-primary-hover);
@@ -144,9 +155,20 @@ button {
 }
 
 .btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-5);
+  font-size: var(--text-base);
+  font-weight: 500;
+  font-family: inherit;
+  transition: all var(--duration-fast) var(--ease-out);
   background: var(--c-surface);
   color: var(--c-text);
   border: 1px solid var(--c-border);
+  text-decoration: none;
 }
 .btn-secondary:hover {
   background: var(--c-accent);
@@ -157,9 +179,20 @@ button {
 .btn-secondary:active { box-shadow: none; }
 
 .btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-5);
+  font-size: var(--text-base);
+  font-weight: 500;
+  font-family: inherit;
+  transition: all var(--duration-fast) var(--ease-out);
   background: var(--c-danger);
   color: white;
   border: 1px solid var(--c-danger);
+  text-decoration: none;
 }
 .btn-danger:hover {
   background: var(--c-danger-hover);
@@ -167,8 +200,19 @@ button {
 }
 
 .btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-5);
+  font-size: var(--text-base);
+  font-weight: 500;
+  font-family: inherit;
+  transition: all var(--duration-fast) var(--ease-out);
   background: transparent;
   color: var(--c-text-secondary);
+  text-decoration: none;
 }
 .btn-ghost:hover {
   background: var(--c-accent);
@@ -178,7 +222,6 @@ button {
 .btn-sm {
   padding: var(--space-1) var(--space-3);
   font-size: var(--text-sm);
-  border-radius: var(--radius-sm);
 }
 
 /* ===== Form Elements ===== */
