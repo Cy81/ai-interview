@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+venv/
+env/
+env3.*
+
+# Build output
+dist/
+build/
+*.egg-info/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.sw?
+*~
+
+# Python
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.coverage*
+htmlcov/
+coverage.xml
+
+# Logs
+logs/*
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Uploads (user data)
+uploads/
+
+# Docker compose runtime data
+celerybeat-schedule.db
+
+# Claude
+.claude/
+
+# Misc
+shell/
+mcp/
+.mcp.json
+resources/prepwise-figma
+docs.zip
+archive.zip
+docker-compose-linux-x86_64
