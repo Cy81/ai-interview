@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    RATE_LIMIT_PER_MINUTE: int = 60
 
     # S3 配置
     AWS_ACCESS_KEY_ID: str = "your-access-key"
@@ -79,7 +80,7 @@ class Settings(BaseSettings):
 
     # Embedding 配置
     EMBEDDING_MODEL: str = "text-embedding-3-small"
-    EMBEDDING_DIM: int = 1536
+    EMBEDDING_DIM: int = 1024
 
     class Config:
         env_file = ".env"

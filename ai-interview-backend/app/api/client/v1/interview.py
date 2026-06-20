@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
@@ -7,6 +7,7 @@ from app.schemas.client.interview import InterviewStart, AnswerSubmit
 from app.services.client.interview_service import interview_service
 from app.schemas.response import ApiResponse
 from app.models.user import User
+from typing import Optional
 
 router = APIRouter()
 
@@ -103,13 +104,17 @@ async def get_messages(
 
 @router.get("")
 async def get_interviews(
+    page: int = Query(1, ge=1, description="页码"),
+    per_page: int = Query(20, ge=1, le=100, description="每页数量"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """获取当前用户的所有面试记录"""
+    """获取当前用户的面试记录（分页）"""
     result = await interview_service.get_interviews(
         db=db,
-        user_id=current_user.id
+        user_id=current_user.id,
+        page=page,
+        per_page=per_page
     )
     return ApiResponse.success(data=result)
 
@@ -127,18 +132,3 @@ async def delete_interview(
         interview_id=interview_id
     )
     return ApiResponse.success(data=result)
-
-@router.delete("/{interview_id}")
-async def delete_interview(
-    interview_id: int,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """删除面试记录"""
-    result = await interview_service.delete_interview(
-        db=db,
-        user_id=current_user.id,
-        interview_id=interview_id
-    )
-    return ApiResponse.success(data=result)
-

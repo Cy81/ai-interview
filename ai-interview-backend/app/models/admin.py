@@ -1,9 +1,7 @@
 from sqlalchemy import Boolean, Column, Integer, String, Enum
 from .base import BaseModel
-from passlib.context import CryptContext
+from app.core.security import _hash_password, _verify_password
 from sqlalchemy.orm import relationship
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class UserRole(str, Enum):
@@ -24,7 +22,7 @@ class Admin(BaseModel):
 
     @staticmethod
     def get_password_hash(password: str) -> str:
-        return pwd_context.hash(password)
+        return _hash_password(password)
 
     def verify_password(self, plain_password: str) -> bool:
-        return pwd_context.verify(plain_password, self.password)
+        return _verify_password(plain_password, self.password)

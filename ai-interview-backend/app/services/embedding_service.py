@@ -1,21 +1,13 @@
 import logging
 from typing import List, Optional, Dict, Any
-from openai import AsyncOpenAI
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.services.llm_config_cache import get_llm_client, get_embedding_model_name, invalidate_cache as _invalidate_cache
 
 logger = logging.getLogger(__name__)
 
-# Embedding 配置缓存
-_embedding_client: Optional[AsyncOpenAI] = None
-_embedding_model: Optional[str] = None
-_cache_loaded_at: float = 0
-_CACHE_TTL = 60
-
-# 默认 embedding 模型
-DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 DEFAULT_EMBEDDING_DIM = 1024
 
 
@@ -23,57 +15,15 @@ class EmbeddingService:
 
     @staticmethod
     async def _get_client() -> tuple:
-        """获取 embedding 客户端和模型名，复用 AIService 的 provider 配置"""
-        global _embedding_client, _embedding_model, _cache_loaded_at
-        import time
-
-        now = time.monotonic()
-        if _embedding_client is not None and (now - _cache_loaded_at) < _CACHE_TTL:
-            return _embedding_client, _embedding_model
-
-        try:
-            # 尝试从数据库获取 provider 配置（复用 chat 模型的 provider）
-            from app.models.llm_provider import LLMProvider, LLMModel
-            from app.db.session import async_session
-
-            async with async_session() as db:
-                result = await db.execute(
-                    select(LLMModel)
-                    .join(LLMProvider)
-                    .where(LLMModel.is_active == True, LLMProvider.is_enabled == True)
-                )
-                model = result.scalar_one_or_none()
-
-                if model is not None:
-                    provider = await db.get(LLMProvider, model.provider_id)
-                    _embedding_client = AsyncOpenAI(
-                        api_key=provider.api_key,
-                        base_url=provider.base_url
-                    )
-                else:
-                    _embedding_client = AsyncOpenAI(
-                        api_key=settings.DEEPSEEK_API_KEY,
-                        base_url=settings.DEEPSEEK_BASE_URL
-                    )
-        except Exception as e:
-            logger.warning(f"从数据库加载 embedding 配置失败: {e}，使用 .env 默认配置")
-            _embedding_client = AsyncOpenAI(
-                api_key=getattr(settings, 'DEEPSEEK_API_KEY', ''),
-                base_url=getattr(settings, 'DEEPSEEK_BASE_URL', '')
-            )
-
-        # embedding 模型使用环境变量或默认值
-        _embedding_model = getattr(settings, 'EMBEDDING_MODEL', DEFAULT_EMBEDDING_MODEL)
-        _cache_loaded_at = time.monotonic()
-        return _embedding_client, _embedding_model
+        """获取 embedding 客户端和模型名（委托给共享缓存模块）"""
+        client, _ = await get_llm_client()
+        model_name = await get_embedding_model_name()
+        return client, model_name
 
     @staticmethod
     async def invalidate_cache():
         """清除缓存"""
-        global _embedding_client, _embedding_model, _cache_loaded_at
-        _embedding_client = None
-        _embedding_model = None
-        _cache_loaded_at = 0
+        await _invalidate_cache()
 
     @staticmethod
     def _get_dim() -> int:

@@ -3,9 +3,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.base import Base
 from .base import BaseModel
-from passlib.context import CryptContext
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+from app.core.security import _hash_password, _verify_password
 
 
 class User(BaseModel):
@@ -31,8 +29,8 @@ class User(BaseModel):
 
     @staticmethod
     def get_password_hash(password: str) -> str:
-        return pwd_context.hash(password)
+        return _hash_password(password)
 
     def verify_password(self, plain_password: str) -> bool:
-        return pwd_context.verify(plain_password, self.hashed_password)
+        return _verify_password(plain_password, self.hashed_password)
 

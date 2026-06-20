@@ -9,6 +9,7 @@ from apscheduler.jobstores.memory import MemoryJobStore
 from app.schedule.job import (
     demo
 )
+from app.schedule.cleanup_llm_logs import cleanup_llm_logs
 
 logger = logging.getLogger(__name__)
 
@@ -109,11 +110,22 @@ def setup_scheduler(app: FastAPI = None):
         # 添加定时任务
         scheduler.add_job(
             async_task_wrapper(demo),
-            'interval', 
+            'interval',
             seconds=60,
             id='demo_task',
             replace_existing=True,
             max_instances=1  # 限制最多只有一个实例在运行
+        )
+
+        # LLM 日志清理（每天凌晨 3 点执行）
+        scheduler.add_job(
+            async_task_wrapper(cleanup_llm_logs),
+            'cron',
+            hour=3,
+            minute=0,
+            id='cleanup_llm_logs',
+            replace_existing=True,
+            max_instances=1
         )
         
         # 启动调度器

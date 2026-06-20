@@ -3,9 +3,17 @@ from typing import Optional, Dict
 from jose import jwt, JWTError
 from app.core.config import settings
 import uuid
-from passlib.context import CryptContext
+import bcrypt
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _hash_password(password: str) -> str:
+    """使用 bcrypt 哈希密码（直接调用，不依赖 passlib）"""
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_password(plain: str, hashed: str) -> bool:
+    """验证 bcrypt 密码"""
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 
 class AuthBase:
@@ -35,7 +43,7 @@ class AuthBase:
         if expires_delta:
             expire = datetime.now(UTC) + expires_delta
         else:
-            expire = datetime.now(UTC) + timedelta(days=7)  # 默认7天
+            expire = datetime.now(UTC) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
         to_encode = {
             "exp": expire,
@@ -63,9 +71,9 @@ class AuthBase:
     @staticmethod
     def hash_token(token: str) -> str:
         """对令牌进行哈希"""
-        return pwd_context.hash(token)
+        return _hash_password(token)
 
     @staticmethod
     def verify_token_hash(plain_token: str, hashed_token: str) -> bool:
         """验证令牌哈希"""
-        return pwd_context.verify(plain_token, hashed_token)
+        return _verify_password(plain_token, hashed_token)

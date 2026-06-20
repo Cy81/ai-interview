@@ -5,15 +5,27 @@ import logging
 from typing import Dict, List, Optional, Tuple
 from openai import AsyncOpenAI
 from app.core.config import settings
+from app.services.llm_config_cache import get_llm_client, invalidate_cache as _invalidate_cache
 
 logger = logging.getLogger(__name__)
 
-# ---- 动态配置缓存 ----
-_cached_client: Optional[AsyncOpenAI] = None
-_cached_model: Optional[str] = None
-_cache_loaded_at: float = 0
-_CACHE_TTL = 60  # 秒
-_cache_lock = asyncio.Lock()
+MAX_RETRIES = 2
+RETRY_BASE_DELAY = 1.0
+
+
+async def _retry_async(fn, *args, max_retries=MAX_RETRIES, **kwargs):
+    """带指数退避的异步重试包装器"""
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await fn(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            if attempt < max_retries:
+                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(f"LLM 调用失败 (attempt {attempt + 1}/{max_retries + 1}): {e}，{delay}s 后重试")
+                await asyncio.sleep(delay)
+    raise last_exc
 
 
 class AIService:
@@ -21,117 +33,142 @@ class AIService:
 
     @staticmethod
     async def _get_client() -> Tuple[AsyncOpenAI, str]:
-        """
-        获取当前激活的 LLM 客户端和模型名称。
-        带 60 秒 TTL 缓存，首次调用从数据库加载，
-        如果没有激活配置则回退到 .env 中的 DeepSeek 配置。
-        """
-        global _cached_client, _cached_model, _cache_loaded_at
-
-        now = time.monotonic()
-        if _cached_client is not None and (now - _cache_loaded_at) < _CACHE_TTL:
-            return _cached_client, _cached_model
-
-        async with _cache_lock:
-            # 双重检查
-            now = time.monotonic()
-            if _cached_client is not None and (now - _cache_loaded_at) < _CACHE_TTL:
-                return _cached_client, _cached_model
-
-            # 尝试从数据库加载
-            try:
-                from sqlalchemy import select
-                from app.models.llm_provider import LLMProvider, LLMModel
-                from app.db.session import async_session
-
-                async with async_session() as db:
-                    result = await db.execute(
-                        select(LLMModel)
-                        .join(LLMProvider)
-                        .where(LLMModel.is_active == True, LLMProvider.is_enabled == True)
-                    )
-                    model = result.scalar_one_or_none()
-
-                    if model is not None:
-                        provider = await db.get(LLMProvider, model.provider_id)
-                        _cached_client = AsyncOpenAI(
-                            api_key=provider.api_key,
-                            base_url=provider.base_url
-                        )
-                        _cached_model = model.model_name
-                        logger.info(
-                            f"AI 配置已从数据库加载: provider={provider.name}, "
-                            f"model={model.model_name}"
-                        )
-                    else:
-                        # 没有激活配置，回退到 .env
-                        _cached_client = AsyncOpenAI(
-                            api_key=settings.DEEPSEEK_API_KEY,
-                            base_url=settings.DEEPSEEK_BASE_URL
-                        )
-                        _cached_model = settings.DEEPSEEK_MODEL
-                        logger.warning("数据库中没有激活的 LLM 配置，使用 .env 默认配置")
-
-            except Exception as e:
-                logger.error(f"从数据库加载 LLM 配置失败: {e}，回退到 .env 默认配置")
-                _cached_client = AsyncOpenAI(
-                    api_key=settings.DEEPSEEK_API_KEY,
-                    base_url=settings.DEEPSEEK_BASE_URL
-                )
-                _cached_model = settings.DEEPSEEK_MODEL
-
-            _cache_loaded_at = time.monotonic()
-            return _cached_client, _cached_model
+        """获取当前激活的 LLM 客户端和模型名称（委托给共享缓存模块）"""
+        return await get_llm_client()
 
     @staticmethod
     async def invalidate_config_cache():
         """清除配置缓存，下次调用时重新从数据库加载"""
-        global _cached_client, _cached_model, _cache_loaded_at
-        _cached_client = None
-        _cached_model = None
-        _cache_loaded_at = 0
+        await _invalidate_cache()
         logger.info("AI 配置缓存已清除")
 
     @staticmethod
-    async def _chat(messages: list, temperature: float = 0.7) -> str:
-        """基础对话补全调用"""
+    async def _chat(messages: list, temperature: float = 0.7, context: dict = None) -> str:
+        """基础对话补全调用（带重试）"""
         try:
             client, model_name = await AIService._get_client()
-            response = await client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=2000
-            )
+            start_time = time.monotonic()
+
+            async def _do_call():
+                return await client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=2000
+                )
+
+            response = await _retry_async(_do_call)
+            latency_ms = int((time.monotonic() - start_time) * 1000)
+
             if not response.choices:
                 logger.warning(f"LLM API 返回空 choices, model={model_name}")
                 return ""
+
             content = response.choices[0].message.content
-            return content.strip() if content else ""
+            result = content.strip() if content else ""
+
+            # 记录调用日志
+            if context:
+                usage = response.usage
+                from app.services.llm_call_logger import log_llm_call
+                log_llm_call(
+                    interview_id=context.get("interview_id"),
+                    call_type=context.get("call_type", "other"),
+                    question_index=context.get("question_index"),
+                    model_name=model_name,
+                    temperature=temperature,
+                    request_messages=messages,
+                    response_content=result,
+                    prompt_tokens=usage.prompt_tokens if usage else 0,
+                    completion_tokens=usage.completion_tokens if usage else 0,
+                    total_tokens=usage.total_tokens if usage else 0,
+                    latency_ms=latency_ms,
+                    status="success",
+                )
+
+            return result
         except Exception as e:
             logger.error(f"LLM API 调用失败: {e}")
+            if context:
+                from app.services.llm_call_logger import log_llm_call
+                log_llm_call(
+                    interview_id=context.get("interview_id"),
+                    call_type=context.get("call_type", "other"),
+                    question_index=context.get("question_index"),
+                    model_name="unknown",
+                    temperature=temperature,
+                    request_messages=messages,
+                    response_content=None,
+                    latency_ms=0,
+                    status="error",
+                    error_message=str(e),
+                )
             raise
 
     @staticmethod
-    async def _chat_stream(messages: list, temperature: float = 0.7):
-        """流式对话补全调用，逐块返回文本"""
+    async def _chat_stream(messages: list, temperature: float = 0.7, context: dict = None):
+        """流式对话补全调用，逐块返回文本（带重试）"""
         try:
             client, model_name = await AIService._get_client()
-            stream = await client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=2000,
-                stream=True
-            )
+            start_time = time.monotonic()
+            full_content = ""
+            usage_data = None
+
+            async def _create_stream():
+                return await client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=2000,
+                    stream=True,
+                    stream_options={"include_usage": True}
+                )
+
+            stream = await _retry_async(_create_stream)
             async for chunk in stream:
+                if chunk.usage:
+                    usage_data = chunk.usage
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
                 if delta and delta.content:
+                    full_content += delta.content
                     yield delta.content
+
+            latency_ms = int((time.monotonic() - start_time) * 1000)
+
+            if context:
+                from app.services.llm_call_logger import log_llm_call
+                log_llm_call(
+                    interview_id=context.get("interview_id"),
+                    call_type=context.get("call_type", "other"),
+                    question_index=context.get("question_index"),
+                    model_name=model_name,
+                    temperature=temperature,
+                    request_messages=messages,
+                    response_content=full_content,
+                    prompt_tokens=usage_data.prompt_tokens if usage_data else 0,
+                    completion_tokens=usage_data.completion_tokens if usage_data else 0,
+                    total_tokens=usage_data.total_tokens if usage_data else 0,
+                    latency_ms=latency_ms,
+                    status="success",
+                )
         except Exception as e:
             logger.error(f"LLM 流式 API 调用失败: {e}")
+            if context:
+                from app.services.llm_call_logger import log_llm_call
+                log_llm_call(
+                    interview_id=context.get("interview_id"),
+                    call_type=context.get("call_type", "other"),
+                    question_index=context.get("question_index"),
+                    model_name="unknown",
+                    temperature=temperature,
+                    request_messages=messages,
+                    response_content=None,
+                    latency_ms=0,
+                    status="error",
+                    error_message=str(e),
+                )
             raise
 
     @staticmethod
@@ -147,7 +184,7 @@ class AIService:
         return json.loads(text)
 
     @staticmethod
-    async def parse_resume(resume_text: str) -> dict:
+    async def parse_resume(resume_text: str, interview_id: int = None) -> dict:
         """解析简历文本，提取结构化信息"""
         messages = [
             {"role": "system", "content": (
@@ -159,11 +196,14 @@ class AIService:
             )},
             {"role": "user", "content": f"请解析以下简历内容：\n\n{resume_text}"}
         ]
-        result = await AIService._chat(messages, temperature=0.3)
+        result = await AIService._chat(messages, temperature=0.3, context={
+            "interview_id": interview_id,
+            "call_type": "parse_resume",
+        })
         return AIService._extract_json(result)
 
     @staticmethod
-    async def analyze_resume(parsed_resume: dict, target_position: str) -> dict:
+    async def analyze_resume(parsed_resume: dict, target_position: str, interview_id: int = None) -> dict:
         """分析简历质量，给出评分、优劣势和改进建议"""
         is_intern = any(kw in target_position.lower() for kw in ["实习", "intern"])
         if is_intern:
@@ -200,12 +240,19 @@ class AIService:
                 f"简历内容：{json.dumps(parsed_resume, ensure_ascii=False)}"
             )}
         ]
-        result = await AIService._chat(messages, temperature=0.4)
+        result = await AIService._chat(messages, temperature=0.4, context={
+            "interview_id": interview_id,
+            "call_type": "analyze_resume",
+        })
         return AIService._extract_json(result)
 
     @staticmethod
-    async def generate_questions(parsed_resume: dict, target_position: str, difficulty: str, count: int) -> list:
-        """根据简历和目标岗位生成面试题目"""
+    async def generate_questions(parsed_resume: dict, target_position: str, difficulty: str, count: int,
+                                 interview_id: int = None,
+                                 position_template=None,
+                                 knowledge_chunks=None,
+                                 reference_questions=None) -> list:
+        """根据简历和目标岗位生成面试题目（支持 RAG 增强）"""
         difficulty_map = {
             "easy": "初级，侧重基础知识和简单项目经验",
             "medium": "中级，涵盖技术深度和项目设计思路",
@@ -228,15 +275,52 @@ class AIService:
                 "- 可以涉及系统设计、性能优化、线上问题排查等\n"
                 "- 考察解决实际问题的能力和技术深度\n"
             )
+
+        # ---- RAG 增强：岗位模板 ----
+        template_section = ""
+        if position_template:
+            parts = []
+            if position_template.interview_focus:
+                parts.append(f"- 面试重点：{position_template.interview_focus}")
+            if position_template.core_skills:
+                skills = position_template.core_skills if isinstance(position_template.core_skills, list) else []
+                parts.append(f"- 核心技能：{', '.join(skills)}")
+            if position_template.key_evaluation_criteria:
+                parts.append(f"- 评估标准：{position_template.key_evaluation_criteria}")
+            if parts:
+                template_section = "\n## 岗位信息\n" + "\n".join(parts) + "\n"
+
+        # ---- RAG 增强：知识库片段 ----
+        knowledge_section = ""
+        if knowledge_chunks:
+            items = []
+            for i, chunk in enumerate(knowledge_chunks[:5], 1):
+                title = chunk.get("document_title", "未知")
+                content = chunk.get("content", "")[:300]
+                items.append(f"{i}. [{title}] {content}")
+            knowledge_section = "\n## 参考知识（来自知识库，供出题参考）\n" + "\n".join(items) + "\n"
+
+        # ---- RAG 增强：参考题目 ----
+        ref_section = ""
+        if reference_questions:
+            items = []
+            for i, q in enumerate(reference_questions[:3], 1):
+                items.append(f"{i}. [{q.get('category', '')}] {q.get('question', '')}")
+            ref_section = "\n## 参考题目（来自题库，仅供参考，不要直接使用）\n" + "\n".join(items) + "\n"
+
         messages = [
             {"role": "system", "content": (
                 f"你是一个资深技术面试官，正在面试{target_position}岗位。\n"
-                f"面试难度：{difficulty_desc}\n{position_hint}\n"
-                "请根据候选人背景生成面试题。要求：\n"
+                f"面试难度：{difficulty_desc}\n{position_hint}"
+                f"{template_section}"
+                f"{knowledge_section}"
+                f"{ref_section}"
+                "\n请根据候选人背景生成面试题。要求：\n"
                 "1. 结合候选人的项目经验和技术栈提问\n"
                 "2. 第一题是自我介绍\n"
                 "3. 覆盖技术深度、项目经验、基础知识\n"
-                "4. 返回纯JSON数组格式（不要markdown代码块）\n"
+                "4. 优先覆盖岗位核心技能和知识库相关内容\n"
+                "5. 返回纯JSON数组格式（不要markdown代码块）\n"
                 '格式：[{"index": 0, "question": "题目内容", "category": "分类"}]\n'
                 "分类包括：self-intro, project, technical, coding, system-design"
             )},
@@ -245,11 +329,15 @@ class AIService:
                 f"目标岗位：{target_position}\n请生成{count}道面试题。"
             )}
         ]
-        result = await AIService._chat(messages, temperature=0.7)
+        result = await AIService._chat(messages, temperature=0.7, context={
+            "interview_id": interview_id,
+            "call_type": "generate_questions",
+        })
         return AIService._extract_json(result)
 
     @staticmethod
-    async def evaluate_answer(question, answer, resume_context, chat_history, next_question=None) -> dict:
+    async def evaluate_answer(question, answer, resume_context, chat_history, next_question=None,
+                              interview_id: int = None, question_index: int = None) -> dict:
         """评估候选人的回答，返回评分和反馈"""
         history_text = ""
         for msg in chat_history[-6:]:
@@ -273,11 +361,16 @@ class AIService:
                 f"当前问题：{question}\n候选人回答：{answer}\n请评估这个回答。"
             )}
         ]
-        result = await AIService._chat(messages, temperature=0.5)
+        result = await AIService._chat(messages, temperature=0.5, context={
+            "interview_id": interview_id,
+            "call_type": "evaluate_answer",
+            "question_index": question_index,
+        })
         return AIService._extract_json(result)
 
     @staticmethod
-    async def evaluate_answer_stream(question, answer, resume_context, chat_history):
+    async def evaluate_answer_stream(question, answer, resume_context, chat_history,
+                                     interview_id: int = None, question_index: int = None):
         """流式版本：评估回答并逐块输出评语，最后输出 JSON 评分"""
         history_text = ""
         for msg in chat_history[-6:]:
@@ -296,11 +389,15 @@ class AIService:
                 f"当前问题：{question}\n候选人回答：{answer}\n请评估这个回答。"
             )}
         ]
-        async for chunk in AIService._chat_stream(messages, temperature=0.5):
+        async for chunk in AIService._chat_stream(messages, temperature=0.5, context={
+            "interview_id": interview_id,
+            "call_type": "evaluate_answer_stream",
+            "question_index": question_index,
+        }):
             yield chunk
 
     @staticmethod
-    async def generate_report(parsed_resume, target_position, questions_and_scores) -> dict:
+    async def generate_report(parsed_resume, target_position, questions_and_scores, interview_id: int = None) -> dict:
         """根据面试记录生成综合评估报告"""
         qa_text = ""
         for item in questions_and_scores:
@@ -324,5 +421,8 @@ class AIService:
                 f"目标岗位：{target_position}\n面试记录：\n{qa_text}\n请生成综合评估报告。"
             )}
         ]
-        result = await AIService._chat(messages, temperature=0.5)
+        result = await AIService._chat(messages, temperature=0.5, context={
+            "interview_id": interview_id,
+            "call_type": "generate_report",
+        })
         return AIService._extract_json(result)

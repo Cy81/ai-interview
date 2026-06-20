@@ -19,6 +19,15 @@ export async function submitAnswerStream(interviewId, answer, onChunk, onDone) {
     body: JSON.stringify({ answer })
   })
 
+  if (!response.ok) {
+    let errorMsg = `请求失败 (${response.status})`
+    try {
+      const errBody = await response.json()
+      errorMsg = errBody.message || errBody.detail || errorMsg
+    } catch {}
+    throw new Error(errorMsg)
+  }
+
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''

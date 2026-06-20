@@ -1,13 +1,15 @@
 import json
 import logging
+import asyncio
 from decimal import Decimal
-from typing import Dict, List
+from typing import Dict, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from app.models.interview import Interview
 from app.models.interview_message import InterviewMessage
 from app.models.resume import Resume
 from app.services.client.ai_service import AIService
+from app.services.rag_service import rag_service
 from app.exceptions.http_exceptions import NotFoundError, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -40,15 +42,7 @@ class InterviewService:
 
         parsed_resume = json.loads(resume.parsed_content)
 
-        # 通过 AI 生成面试题目
-        questions = await AIService.generate_questions(
-            parsed_resume=parsed_resume,
-            target_position=target_position,
-            difficulty=difficulty,
-            count=total_questions
-        )
-
-        # 创建面试记录
+        # 先创建面试记录（状态为 generating），以便获取 interview_id
         interview = Interview(
             user_id=user_id,
             resume_id=resume_id,
@@ -56,10 +50,62 @@ class InterviewService:
             difficulty=difficulty,
             total_questions=total_questions,
             current_question_index=0,
-            questions_data=questions,
-            status="in_progress"
+            questions_data=None,
+            status="generating"
         )
         db.add(interview)
+        await db.commit()
+        await db.refresh(interview)
+
+        # RAG 增强：查找岗位模板并检索知识库和题库
+        position_template = await rag_service.get_position_template(db, target_position)
+
+        skills = parsed_resume.get("skills", [])
+        search_query = f"{target_position} {' '.join(skills[:5])}"
+
+        knowledge_chunks, reference_questions = await asyncio.gather(
+            rag_service.retrieve_knowledge(db, search_query, top_k=5),
+            rag_service.retrieve_questions(
+                db, search_query,
+                position_tag=target_position,
+                difficulty=difficulty,
+                top_k=3
+            ),
+            return_exceptions=True
+        )
+
+        # 降级处理：检索失败不影响面试启动
+        if isinstance(knowledge_chunks, Exception):
+            logger.warning(f"知识库检索失败: {knowledge_chunks}")
+            knowledge_chunks = []
+        if isinstance(reference_questions, Exception):
+            logger.warning(f"题库检索失败: {reference_questions}")
+            reference_questions = []
+
+        if knowledge_chunks:
+            logger.info(f"RAG 检索到 {len(knowledge_chunks)} 个知识片段")
+        if reference_questions:
+            logger.info(f"RAG 检索到 {len(reference_questions)} 个参考题目")
+
+        # 通过 AI 生成面试题目
+        questions = await AIService.generate_questions(
+            parsed_resume=parsed_resume,
+            target_position=target_position,
+            difficulty=difficulty,
+            count=total_questions,
+            interview_id=interview.id,
+            position_template=position_template,
+            knowledge_chunks=knowledge_chunks,
+            reference_questions=reference_questions
+        )
+
+        # 回写题库 usage_count
+        if reference_questions:
+            await rag_service.increment_usage_count(db, reference_questions)
+
+        # 更新面试记录
+        interview.questions_data = questions
+        interview.status = "in_progress"
         await db.commit()
         await db.refresh(interview)
 
@@ -135,7 +181,9 @@ class InterviewService:
             question=current_question,
             answer=answer,
             resume_context=parsed_resume,
-            chat_history=chat_history
+            chat_history=chat_history,
+            interview_id=interview_id,
+            question_index=current_index
         )
 
         score = float(evaluation.get("score", 5.0))
@@ -177,7 +225,10 @@ class InterviewService:
             overall = round(sum(all_scores) / len(all_scores), 1) if all_scores else 0
             interview.overall_score = Decimal(str(overall))
 
-            # 生成评估报告
+            # 先提交状态和分数，报告异步生成
+            await db.commit()
+
+            # 后台生成评估报告
             qa_data = []
             for i, q in enumerate(questions):
                 q_msgs = [m for m in messages if m.role == "candidate" and m.question_index == i]
@@ -187,21 +238,13 @@ class InterviewService:
                     "score": float(q_msgs[0].score) if q_msgs and q_msgs[0].score else score if i == current_index else 0
                 })
 
-            try:
-                report = await AIService.generate_report(
-                    parsed_resume=parsed_resume,
-                    target_position=interview.target_position,
-                    questions_and_scores=qa_data
-                )
-                # 将每题评分加入报告
-                report["question_scores"] = [
-                    {"question": q["question"], "score": qa["score"], "feedback": ""}
-                    for q, qa in zip(questions, qa_data)
-                ]
-                interview.report = json.dumps(report, ensure_ascii=False)
-            except Exception as e:
-                logger.error(f"报告生成失败: {e}")
-                interview.report = json.dumps({"summary": "报告生成失败", "strengths": [], "weaknesses": [], "suggestions": []})
+            asyncio.create_task(InterviewService._generate_report_background(
+                interview_id=interview_id,
+                parsed_resume=parsed_resume,
+                target_position=interview.target_position,
+                questions_and_scores=qa_data,
+                questions=questions
+            ))
 
         else:
             # 进入下一题
@@ -280,7 +323,9 @@ class InterviewService:
             question=current_question,
             answer=answer,
             resume_context=parsed_resume,
-            chat_history=chat_history
+            chat_history=chat_history,
+            interview_id=interview_id,
+            question_index=current_index
         ):
             full_text += chunk
             yield f"data: {json.dumps({'type': 'chunk', 'content': chunk}, ensure_ascii=False)}\n\n"
@@ -324,7 +369,10 @@ class InterviewService:
             overall = round(sum(all_scores) / len(all_scores), 1) if all_scores else 0
             interview.overall_score = Decimal(str(overall))
 
-            # 生成评估报告
+            # 先提交状态和分数，报告异步生成
+            await db.commit()
+
+            # 后台生成评估报告
             qa_data = []
             for i, q in enumerate(questions):
                 q_msgs = [m for m in messages if m.role == "candidate" and m.question_index == i]
@@ -333,22 +381,13 @@ class InterviewService:
                     "answer": q_msgs[0].content if q_msgs else answer if i == current_index else "未回答",
                     "score": float(q_msgs[0].score) if q_msgs and q_msgs[0].score else score if i == current_index else 0
                 })
-            try:
-                report = await AIService.generate_report(
-                    parsed_resume=parsed_resume,
-                    target_position=interview.target_position,
-                    questions_and_scores=qa_data
-                )
-                report["question_scores"] = [
-                    {"question": q["question"], "score": qa["score"], "feedback": ""}
-                    for q, qa in zip(questions, qa_data)
-                ]
-                interview.report = json.dumps(report, ensure_ascii=False)
-            except Exception as e:
-                logger.error(f"报告生成失败: {e}")
-                interview.report = json.dumps({"summary": "报告生成失败", "strengths": [], "weaknesses": [], "suggestions": []})
-
-            await db.commit()
+            asyncio.create_task(InterviewService._generate_report_background(
+                interview_id=interview_id,
+                parsed_resume=parsed_resume,
+                target_position=interview.target_position,
+                questions_and_scores=qa_data,
+                questions=questions
+            ))
             yield f"data: {json.dumps({'type': 'done', 'score': score, 'feedback': feedback[:200], 'is_finished': True, 'question_index': current_index}, ensure_ascii=False)}\n\n"
         else:
             # 进入下一题
@@ -401,12 +440,27 @@ class InterviewService:
     @staticmethod
     async def get_interviews(
         db: AsyncSession,
-        user_id: int
+        user_id: int,
+        page: int = 1,
+        per_page: int = 20
     ) -> Dict:
-        """获取用户的所有面试记录"""
-        query = select(Interview).where(
-            Interview.user_id == user_id
-        ).order_by(Interview.created_at.desc())
+        """获取用户的面试记录（分页）"""
+        base_filter = Interview.user_id == user_id
+
+        # 总数
+        count_result = await db.execute(
+            select(func.count(Interview.id)).where(base_filter)
+        )
+        total = count_result.scalar() or 0
+
+        # 分页查询
+        query = (
+            select(Interview)
+            .where(base_filter)
+            .order_by(Interview.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
         result = await db.execute(query)
         interviews = result.scalars().all()
 
@@ -424,8 +478,10 @@ class InterviewService:
         ]
 
         return {
-            "total": len(items),
-            "items": items
+            "total": total,
+            "items": items,
+            "page": page,
+            "per_page": per_page
         }
 
     @staticmethod
@@ -512,6 +568,46 @@ class InterviewService:
         await db.commit()
 
         return {"message": "面试记录已删除"}
+
+    @staticmethod
+    async def _generate_report_background(
+        interview_id: int,
+        parsed_resume: dict,
+        target_position: str,
+        questions_and_scores: list,
+        questions: list
+    ):
+        """后台异步生成评估报告"""
+        from app.db.session import async_session
+
+        try:
+            report = await AIService.generate_report(
+                parsed_resume=parsed_resume,
+                target_position=target_position,
+                questions_and_scores=questions_and_scores,
+                interview_id=interview_id
+            )
+            report["question_scores"] = [
+                {"question": q["question"], "score": qa["score"], "feedback": ""}
+                for q, qa in zip(questions, questions_and_scores)
+            ]
+
+            async with async_session() as db:
+                interview = await db.get(Interview, interview_id)
+                if interview:
+                    interview.report = json.dumps(report, ensure_ascii=False)
+                    await db.commit()
+                    logger.info(f"面试 {interview_id} 报告已异步生成")
+        except Exception as e:
+            logger.error(f"异步报告生成失败 (interview={interview_id}): {e}")
+            async with async_session() as db:
+                interview = await db.get(Interview, interview_id)
+                if interview:
+                    interview.report = json.dumps({
+                        "summary": "报告生成失败，请重试",
+                        "strengths": [], "weaknesses": [], "suggestions": []
+                    })
+                    await db.commit()
 
 
 interview_service = InterviewService()

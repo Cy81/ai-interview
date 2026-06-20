@@ -22,6 +22,18 @@
           <span class="nav-icon">&#x1F916;</span> LLM 配置
         </router-link>
 
+        <div class="nav-divider"><span>LLM 监控</span></div>
+
+        <router-link to="/admin/llm-logs" active-class="active">
+          <span class="nav-icon">&#x1F50D;</span> 调用日志
+        </router-link>
+        <router-link to="/admin/token-stats" active-class="active">
+          <span class="nav-icon">&#x1F4CA;</span> Token 统计
+        </router-link>
+        <router-link to="/admin/evaluation" active-class="active">
+          <span class="nav-icon">&#x1F4C8;</span> 评测指标
+        </router-link>
+
         <div class="nav-divider"><span>知识库 RAG</span></div>
 
         <router-link to="/admin/question-bank" active-class="active">

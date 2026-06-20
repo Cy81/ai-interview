@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # 路由导入已移动到路由注册中心统一管理
 
 from app.core.config import settings
+from app.core.rate_limiter import RateLimitMiddleware
 from app.configs.docs_apps import create_client_app, create_backoffice_app
 from fastapi.exceptions import RequestValidationError
 from app.exceptions.http_exceptions import APIException
@@ -84,6 +85,9 @@ def create_app():
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # 速率限制
+    app.add_middleware(RateLimitMiddleware)
 
     # 开发环境提供文档访问指引，生产环境隐藏
     if settings.ENV in ["development", "preview"]:

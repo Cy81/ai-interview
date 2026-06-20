@@ -61,6 +61,29 @@
         <h3 class="modal-title">配置面试 &mdash; {{ configModal.file_name }}</h3>
 
         <div class="form-group">
+          <label>选择岗位模板</label>
+          <select v-model="configForm.template_id" @change="onTemplateChange" class="template-select">
+            <option :value="null">自定义（不使用模板）</option>
+            <option v-for="t in positionTemplates" :key="t.id" :value="t.id">
+              {{ t.position_tag }}
+            </option>
+          </select>
+        </div>
+
+        <div v-if="selectedTemplate" class="template-info">
+          <div v-if="selectedTemplate.core_skills?.length" class="template-tags">
+            <span class="template-label">核心技能</span>
+            <div class="tag-list">
+              <span v-for="skill in selectedTemplate.core_skills" :key="skill" class="skill-tag">{{ skill }}</span>
+            </div>
+          </div>
+          <div v-if="selectedTemplate.interview_focus" class="template-focus">
+            <span class="template-label">面试重点</span>
+            <p class="focus-text">{{ selectedTemplate.interview_focus }}</p>
+          </div>
+        </div>
+
+        <div class="form-group">
           <label>目标岗位</label>
           <input v-model="configForm.target_position" placeholder="如：前端开发工程师" />
         </div>
@@ -163,10 +186,11 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getInterviews, deleteInterview, startInterview } from '../api/interview'
 import { getResumes } from '../api/resume'
+import { getPositionTemplates } from '../api/positionTemplates'
 import { useToastStore } from '../stores/toast'
 import { formatDate, difficultyMap } from '../utils/helpers'
 
@@ -182,19 +206,36 @@ const showResumePanel = ref(false)
 const interviews = ref([])
 const interviewsLoading = ref(true)
 
+// 岗位模板
+const positionTemplates = ref([])
+
 // 面试配置弹窗
 const configModal = ref(null)
 const configForm = reactive({
   target_position: '',
   difficulty: 'medium',
-  total_questions: 5
+  total_questions: 5,
+  template_id: null
 })
 const starting = ref(false)
+
+const selectedTemplate = computed(() => {
+  if (!configForm.template_id) return null
+  return positionTemplates.value.find(t => t.id === configForm.template_id) || null
+})
+
+function onTemplateChange() {
+  const tpl = selectedTemplate.value
+  if (tpl) {
+    configForm.target_position = tpl.position_tag
+  }
+}
 
 function openInterviewConfig(resume) {
   configForm.target_position = resume.target_position || 'Python后端开发工程师'
   configForm.difficulty = 'medium'
   configForm.total_questions = 5
+  configForm.template_id = null
   configModal.value = resume
 }
 
@@ -233,9 +274,10 @@ async function handleDelete(interviewId) {
 }
 
 onMounted(async () => {
-  const [resumeData, interviewData] = await Promise.allSettled([
+  const [resumeData, interviewData, templateData] = await Promise.allSettled([
     getResumes(),
-    getInterviews()
+    getInterviews(),
+    getPositionTemplates()
   ])
 
   if (resumeData.status === 'fulfilled') {
@@ -247,6 +289,10 @@ onMounted(async () => {
     interviews.value = interviewData.value?.items || []
   }
   interviewsLoading.value = false
+
+  if (templateData.status === 'fulfilled') {
+    positionTemplates.value = templateData.value || []
+  }
 })
 </script>
 
@@ -313,6 +359,70 @@ onMounted(async () => {
 }
 .btn-delete:hover { color: var(--c-danger); background: var(--c-danger-light); border-color: var(--c-danger); }
 .resume-list { display: flex; flex-direction: column; gap: var(--space-3); }
+
+/* 岗位模板选择器 */
+.template-select {
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-base);
+  background: var(--c-surface);
+  color: var(--c-text);
+  cursor: pointer;
+  transition: border-color var(--duration-fast);
+  appearance: auto;
+}
+.template-select:focus {
+  outline: none;
+  border-color: var(--c-primary);
+  box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+}
+
+.template-info {
+  background: var(--c-primary-light);
+  border: 1px solid var(--c-primary);
+  border-radius: var(--radius-sm);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.template-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--c-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  display: block;
+  margin-bottom: var(--space-1);
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.skill-tag {
+  display: inline-block;
+  padding: 2px 10px;
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  background: var(--c-surface);
+  color: var(--c-primary);
+  border: 1px solid var(--c-primary);
+  border-radius: 999px;
+}
+
+.focus-text {
+  font-size: var(--text-sm);
+  color: var(--c-text-secondary);
+  margin: 0;
+  line-height: 1.6;
+}
 .resume-item {
   display: flex; justify-content: space-between; align-items: center;
   padding: var(--space-4) var(--space-5);

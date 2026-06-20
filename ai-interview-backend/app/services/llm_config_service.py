@@ -4,6 +4,7 @@ from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from openai import AsyncOpenAI
+from app.services.llm_config_cache import invalidate_cache as invalidate_llm_cache
 
 from app.models.llm_provider import LLMProvider, LLMModel
 from app.schemas.llm_config import (
@@ -73,8 +74,7 @@ class LLMConfigService:
         await db.commit()
         await db.refresh(provider)
 
-        from app.services.client.ai_service import AIService
-        await AIService.invalidate_config_cache()
+        await invalidate_llm_cache()
 
         return LLMConfigService._provider_to_response(provider)
 
@@ -140,8 +140,7 @@ class LLMConfigService:
         await db.commit()
         await db.refresh(model)
 
-        from app.services.client.ai_service import AIService
-        await AIService.invalidate_config_cache()
+        await invalidate_llm_cache()
 
         return LLMConfigService._model_to_response(model)
 
@@ -171,8 +170,7 @@ class LLMConfigService:
         await db.commit()
         await db.refresh(model)
 
-        from app.services.client.ai_service import AIService
-        await AIService.invalidate_config_cache()
+        await invalidate_llm_cache()
 
         return LLMConfigService._model_to_response(model)
 
